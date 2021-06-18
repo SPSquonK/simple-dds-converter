@@ -1,6 +1,6 @@
 {
   "name": "sdds",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "A basic and bad DDS file parser",
   "keywords": [
     "dds"
@@ -12,7 +12,6 @@
   "dependencies": {
     "pngjs": "^6.0.0"
   },
-  "devDependencies": {},
   "repository": {
     "type": "git",
     "url": "git+https://github.com/SPSquonK/simple-dds-converter.git"
@@ -20,5 +19,8 @@
   "bugs": {
     "url": "https://github.com/SPSquonK/simple-dds-converter/issues"
   },
-  "homepage": "https://github.com/SPSquonK/simple-dds-converter#readme"
+  "homepage": "https://github.com/SPSquonK/simple-dds-converter#readme",
+  "devDependencies": {
+    "typescript": "^4.3.4"
+  }
 }

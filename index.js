@@ -6,6 +6,21 @@ const { PNG } = require('pngjs');
 
 //////////////////////////////////////////////////////////////////////////////// 
 //////////////////////////////////////////////////////////////////////////////// 
+// Configuration
+
+/**
+ * Some configuration to catch some errors in the processing of DDS files
+ */
+let config = {
+    /**
+     * If set to true, more check will be performed to see if the image is in
+     * a supported format
+     */
+    strongerFormatCheck: false
+};
+
+//////////////////////////////////////////////////////////////////////////////// 
+//////////////////////////////////////////////////////////////////////////////// 
 // Bytes scanning
 
 /** A scanner on bytes */
@@ -178,16 +193,19 @@ function nextStructuredStruct(scanner, type) {
 
     // Data fields
     for (const s of structs[type]) {
-        const [ type, fieldName, flag, forced ] = s;
+        const [ type, fieldName, _flag, _forced ] = s;
 
-        if (flag !== undefined && !(c.dwFlags & flag)) {
-            if (forced) {
-                throw Error(
-                    `The flag for ${fieldName} is disabled but `
-                    + `it should always be enabled`
-                );
-            }
-        }
+        // For the considered files, the flag field actually has no impact
+        // on how to process the data
+        // TODO: look for dwFlags real impact and fix this code
+        //if (flag !== undefined && !(c.dwFlags & flag)) {
+        //    if (forced) {
+        //        throw Error(
+        //            `The flag for ${fieldName} is disabled but `
+        //            + `it should always be enabled`
+        //        );
+        //    }
+        //}
 
         const [ realType, cardinality ] = decomposeType(type);
         if (cardinality === null) {
@@ -258,9 +276,11 @@ function readDDSHeader(buffer) {
  * Parameters are intended to be the values returned by `readDDSHeader`
  * @param {BytesScanner} scanner The scanner that contains the data of the DDS
  * @param {*} dds A struct with the header information of the DDS file
+ * @param {boolean} readMipMap If set to true, the `mipMaps` member may be
+ * added to the returned array if there are any stored in the image
  * @returns A matrix of pixels, in the order `result[line][column]`
  */
-function toMatrixOfPixels(scanner, dds) {
+function toMatrixOfPixels(scanner, dds, readMipMap = false) {
     // Rename some constants
     const height = dds.ddsd.dwHeight;
     const width = dds.ddsd.dwWidth;
@@ -268,8 +288,22 @@ function toMatrixOfPixels(scanner, dds) {
     const bitsPerPixel = pixelFormat.dwRGBBitCount;
 
     // Check if we can support this
-    if (scanner.buffer.length - scanner.i != dds.ddsd.dwPitchOrLinearSize) {
-        throw Error("Unsupported format of dds (has extra info)");
+    if (scanner.buffer.length - scanner.i < dds.ddsd.dwPitchOrLinearSize) {
+        throw Error("Unsupported format of dds (has too few information)");
+    }
+
+    if (config.strongerFormatCheck) {
+        let expectedLeftBytes = height * width * bitsPerPixel / 8;
+
+        for (let i = 0; i < dds.ddsd.dwMipMapCount; ++i) {
+            const localH = height >> (1 + i);
+            const localW = width >> (1 + i);
+            expectedLeftBytes += localH * localW * bitsPerPixel / 8;
+        }
+
+        if (scanner.buffer.length - scanner.i != expectedLeftBytes) {
+            throw Error('Unsupported format of dds - Caugth be stronger check');
+        }
     }
 
     if (dds.ddsd.dwPitchOrLinearSize != height * width * bitsPerPixel / 8) {
@@ -292,19 +326,72 @@ function toMatrixOfPixels(scanner, dds) {
     
     const bytesPerPixel = bitsPerPixel / 8;
     
+    const mainImage = readPixels(
+        scanner, dds.ddsd.dwHeight, dds.ddsd.dwWidth,
+        bytesPerPixel, alpha, red, green, blue
+    );
+
+    if (readMipMap && dds.ddsd.dwMipMapCount > 0) {
+        mainImage.mipMaps = [];
+
+        for (let iMipMap = 0; iMipMap < dds.ddsd.dwMipMapCount; ++iMipMap) {
+            const height = dds.ddsd.dwHeight >> (iMipMap + 1);
+            const width  = dds.ddsd.dwWidth  >> (iMipMap + 1);
+            const requiredBytes = height * width * bytesPerPixel;
+
+            if (requiredBytes > 0) {
+                if (scanner.buffer.length - scanner.i < requiredBytes) {
+                    throw Error(
+                        "Unsupported format of dds (has too few information)"
+                    );
+                }
+
+                mainImage.mipMaps.push(readPixels(
+                    scanner, height, width, bytesPerPixel,
+                    alpha, red, green, blue
+                ));
+            } else {
+                mainImage.mipMaps.push([]);
+            }
+        }
+    }
+
+    return mainImage;
+}
+
+/**
+ * @typedef { function(number): number } ToColor
+ */
+
+/**
+ * Consumes the next `height * width * bytesPerPixel` bytes of the scanner
+ * to produce a 2D matrix with the read image.
+ * @param {BytesScanner} scanner The scanner where the image is stored
+ * @param {number} height The height of the image
+ * @param {number} width The width of the image
+ * @param {number} bytesPerPixel Number of bytes to consume for each pixels
+ * @param {ToColor} a Function to convert the read bytes to the alpha component
+ * @param {ToColor} r Function to convert the read bytes to the red component
+ * @param {ToColor} g Function to convert the read bytes to the green component
+ * @param {ToColor} b Function to convert the read bytes to the blue component
+ * @returns A 2D matrix of pixels, in row-major order, with an alpha, a red,
+ * a green and a blue component. Return null if not enoguh pixels are left in
+ * the scanner
+ */
+function readPixels(scanner, height, width, bytesPerPixel, a, r, g, b) {
     let matrice = [];
-    for (let line = 0 ; line != dds.ddsd.dwHeight ; ++line) {
+    for (let line = 0 ; line != height ; ++line) {
         let thisLine = [];
-        for (let column = 0 ; column != dds.ddsd.dwWidth ; ++column) {
+        for (let column = 0 ; column != width ; ++column) {
             const pixel = [...scanner.nextBytesAsArray(bytesPerPixel)]
                 .reverse()
                 .reduce((acc, v) => acc * 0x100 + v, 0);
             
             thisLine.push({
-                alpha: alpha(pixel),
-                red: red(pixel),
-                green: green(pixel),
-                blue: blue(pixel)
+                alpha: a(pixel),
+                red  : r(pixel),
+                green: g(pixel),
+                blue : b(pixel)
             });
         }
 
@@ -314,6 +401,38 @@ function toMatrixOfPixels(scanner, dds) {
     return matrice;
 }
 
+/**
+ * Converts the matrix of pixels to a PNGJS image
+ * @param {any[][]} matrix The matrix of pixels
+ * @param {number} w The width of the image
+ * @param {number} h The height of the image
+ * @returns {PNG} The PNG image
+ */
+function matrixToPNG(matrix, w, h) {
+    let outputBuffer = Buffer.alloc(w * h * 4);
+    let bitmap = new Uint8Array(outputBuffer.buffer);
+    for (let i = 0; i < h; i++) {
+        for (let j = 0; j < w; j++) {
+            bitmap[i * 4 * w + 4 * j + 0] = matrix[i][j].red;
+            bitmap[i * 4 * w + 4 * j + 1] = matrix[i][j].green;
+            bitmap[i * 4 * w + 4 * j + 2] = matrix[i][j].blue;
+            bitmap[i * 4 * w + 4 * j + 3] = matrix[i][j].alpha;
+        }
+    }
+    
+    let png = new PNG({
+        width: w,
+        height: h,
+        bitDepth: 8,
+        colorType: 6,
+        inputColorType: 6,
+        inputHasAlpha: true,
+    });
+  
+    png.data = outputBuffer;
+      
+    return png;
+}
 
 //////////////////////////////////////////////////////////////////////////////// 
 //////////////////////////////////////////////////////////////////////////////// 
@@ -327,33 +446,35 @@ function toMatrixOfPixels(scanner, dds) {
 function DDStoPNG(buffer) {
     const { scanner, dds } = readDDSHeader(buffer);
 
-    const matrix = toMatrixOfPixels(scanner, dds);
+    const matrix = toMatrixOfPixels(scanner, dds, false);
+    return matrixToPNG(matrix, dds.ddsd.dwWidth, dds.ddsd.dwHeight);
+}
 
-    const w = dds.ddsd.dwWidth;
-    const h = dds.ddsd.dwHeight;
-    let outputBuffer = Buffer.alloc(w * h * 4);
-    let bitmap = new Uint8Array(outputBuffer.buffer);
-    for (let i = 0; i < h; i++) {
-        for (let j = 0; j < w; j++) {
-            bitmap[i * 4 * w + 4 * j + 0] = matrix[i][j].red;
-            bitmap[i * 4 * w + 4 * j + 1] = matrix[i][j].green;
-            bitmap[i * 4 * w + 4 * j + 2] = matrix[i][j].blue;
-            bitmap[i * 4 * w + 4 * j + 3] = matrix[i][j].alpha;
+/**
+ * Converts the given DDS content to PNG. Multiple PNG are returned: the first
+ * one is the main image, and the following are the mipmaps
+ * @param {Buffer} buffer The buffer that contains the bytes of the DDS file
+ * @returns {pngjs.PNG[]} The same image but in PNG, with the mipmaps
+ */
+ function DDStoPNGs(buffer) {
+    const { scanner, dds } = readDDSHeader(buffer);
+
+    const matrix = toMatrixOfPixels(scanner, dds, true);
+
+    const pngs = [];
+    pngs.push(matrixToPNG(matrix, dds.ddsd.dwWidth, dds.ddsd.dwHeight));
+
+    if (matrix.mipMaps !== undefined) {
+        for (const mipMapMatrix of matrix.mipMaps) {
+            const h = mipMapMatrix.length;
+            if (h == 0) continue;
+            const w = mipMapMatrix[0].length;
+
+            pngs.push(matrixToPNG(mipMapMatrix, w, h));
         }
     }
-    
-    let png = new PNG({
-      width: w,
-      height: h,
-      bitDepth: 8,
-      colorType: 6,
-      inputColorType: 6,
-      inputHasAlpha: true,
-    });
 
-    png.data = outputBuffer;
-    
-    return png;
+    return pngs;
 }
 
 // Main export
@@ -363,3 +484,5 @@ module.exports = DDStoPNG;
 module.exports.BytesScanner     = BytesScanner;
 module.exports.readDDSHeader    = readDDSHeader;
 module.exports.toMatrixOfPixels = toMatrixOfPixels;
+module.exports.DDStoPNGs        = DDStoPNGs;
+module.exports._config          = config;
